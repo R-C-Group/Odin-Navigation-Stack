@@ -1,0 +1,39 @@
+planner_config_file: "configs/planner.yaml"
+dune_checkpoint: "example/dune_train/model/go2/model_5000.pth"
+
+refresh_initial_path: True
+flip_angle: False
+include_initial_path_direction: False
+
+frame:
+  map: "map"
+  base: "base_link"
+  lidar: "odin1_base_link"
+
+# Normal Scan Configuration
+topic:
+  scan: "/scan"
+  cmd_vel: "/cmd_vel"
+  path: "/initial_path"
+  waypoints: "/waypoints"
+  goal: "/neupan/goal"
+  arrive: "/neupan/arrive"
+scan_range: [0.2, 10.0]
+scan_angle: [-0.7853, 0.7853]
+scan_downsample: 1
+
+# 360 Scan Configuration
+# topic:
+#   scan: "/scan_360"
+#   cmd_vel: "/cmd_vel"
+#   path: "/initial_path"
+#   waypoints: "/waypoints"
+#   goal: "/move_base_simple/goal/none"
+#   arrive: "/neupan/arrive"
+# scan_range: [0.2, 4.5]
+# scan_angle: [-3.14, 3.14]
+# scan_downsample: 1
+
+marker_size: 0.05
+marker_z: 0.3
+

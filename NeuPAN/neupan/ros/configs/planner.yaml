@@ -1,0 +1,48 @@
+# mpc
+receding: 10
+step_time: 0.1
+ref_speed: 0.5
+device: 'cpu'
+time_print: False
+collision_threshold: 0.05
+
+# robot
+robot:
+  kinematics: 'diff'
+  max_speed: [0.5, 0.7]
+  max_acce: [0.5, 0.7]
+  length: 0.7
+  width: 0.35
+  # vertices: [[-0.8, -1.0], [-0.8, 1.0], [0.8, 1.0], [0.8, -1.0]] 
+
+# initial path
+ipath:
+  interval: 0.1
+  waypoints: []
+  curve_style: 'line'   # 'dubins' or reeds or line
+  min_radius: 0.2
+  loop: False
+  arrive_threshold: 0.2
+  close_threshold: 0.1
+  ind_range: 10
+  arrive_index_threshold: 1
+  
+# proximal alternating minimization network
+pan:
+  iter_num: 3
+  dune_max_num: 100
+  nrmp_max_num: 10
+  iter_threshold: 0.1
+  dune_checkpoint: 'example/dune_train/model/go2/model_5000.pth'
+
+
+# adjust parameters
+adjust:
+  q_s: 0.3 # The weight for the state cost. Large value encourages the robot to follow the initial path closely.
+  p_u: 2.5 # The weight for the speed cost. Large value encourages the robot to follow the reference speed.
+  eta: 10.0 # Slack gain for L1 regularization
+  ro_obs: 400 # The penalty parameters for collision avoidance. Smaller value may require more iterations to converge.
+  d_max: 0.2 # The maximum safety distance.
+  d_min: 0.05
+  bk: 0.1
+
