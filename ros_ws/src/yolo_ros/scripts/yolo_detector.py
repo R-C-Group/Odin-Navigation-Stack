@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 '''
+YOLO目标检测器 - 基于YOLOv5的语义导航系统
+YOLO Detector - Semantic Navigation System based on YOLOv5
+
 Copyright 2025 Manifold Tech Ltd.(www.manifoldtech.com.co)
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,13 +15,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 '''
 
-
+# ROS消息类型导入 / ROS message types import
 import rospy
 from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose
 from vision_msgs.msg import Detection3DArray, Detection3D
 from geometry_msgs.msg import Pose2D, Twist, PointStamped
 from std_msgs.msg import String
+
+# 图像处理和深度学习库 / Image processing and deep learning libraries
 import cv2
 from cv_bridge import CvBridge
 import torch
@@ -28,116 +33,162 @@ import message_filters
 import numpy as np
 import tf2_ros
 
-# add yolov5 path
+# 添加YOLOv5路径到系统路径 / Add YOLOv5 path to system path
 YOLOV5_PATH = os.path.join(os.path.dirname(__file__), "../../../../yolov5")
 sys.path.append(YOLOV5_PATH)
 
-from models.experimental import attempt_load
-from utils.general import non_max_suppression
-from utils.general import scale_boxes
-from utils.plots import Annotator
-from utils.torch_utils import select_device
+# YOLOv5模块导入 / YOLOv5 modules import
+from models.experimental import attempt_load  # 模型加载 / Model loading
+from utils.general import non_max_suppression  # 非极大值抑制 / Non-maximum suppression
+from utils.general import scale_boxes  # 边界框缩放 / Bounding box scaling
+from utils.plots import Annotator  # 结果可视化 / Result visualization
+from utils.torch_utils import select_device  # 设备选择 / Device selection
 
 
 class YoloDetector:
+    """
+    YOLO目标检测器类
+    YOLO Detector Class
+    
+    功能 / Functions:
+    1. 检测RGB图像中的物体（YOLOv5） / Detect objects in RGB images (YOLOv5)
+    2. 计算物体的3D位置（深度图+鱼眼反投影） / Calculate 3D positions (depth map + fisheye unprojection)
+    3. 坐标变换到目标坐标系 / Transform coordinates to target frame
+    4. 发布检测结果和可视化 / Publish detection results and visualization
+    """
+    
     def __init__(self):
+        """
+        初始化YOLO检测器
+        Initialize YOLO detector
+        """
+        # OpenCV-ROS桥接器 / OpenCV-ROS bridge
         self.bridge = CvBridge()
-        self.device = select_device("")  # auto select GPU/CPU
+        
+        # 自动选择设备（GPU优先，否则CPU） / Auto select device (GPU preferred, otherwise CPU)
+        self.device = select_device("")
+        
+        # 加载YOLOv5模型 / Load YOLOv5 model
         self.model = attempt_load(
             os.path.join(os.path.dirname(__file__), "models/yolov5s.pt"),
             device=self.device,
         )
+        
+        # 获取模型步长（用于图像预处理） / Get model stride (for image preprocessing)
         self.stride = int(self.model.stride.max())
+        
+        # 获取类别名称字典 / Get class names dictionary
         self.names = (
             self.model.module.names
             if hasattr(self.model, "module")
             else self.model.names
         )
 
-        self.rgb_topic = rospy.get_param("~rgb_topic", "/odin1/image/compressed")
+        # 从ROS参数服务器读取配置 / Read configuration from ROS parameter server
+        self.rgb_topic = rospy.get_param("~rgb_topic", "/odin1/image/compressed")  # RGB图像话题 / RGB image topic
         self.depth_topic = rospy.get_param(
             "~depth_topic", "/odin1/depth_img_competetion"
-        )
-        self.auto_nav_mode = rospy.get_param("~auto_nav_mode", False)
-        self.camera_frame = rospy.get_param("~camera_frame", "camera_link")
-        self.target_frame = rospy.get_param("~target_frame", "map")
-        self.use_latest_tf = rospy.get_param("~use_latest_tf", True)  # use latest TF
-        self.depth_mode = rospy.get_param("~depth_mode", "z")
+        )  # 深度图话题 / Depth image topic
+        self.auto_nav_mode = rospy.get_param("~auto_nav_mode", False)  # 自动导航模式 / Auto navigation mode
+        self.camera_frame = rospy.get_param("~camera_frame", "camera_link")  # 相机坐标系 / Camera frame
+        self.target_frame = rospy.get_param("~target_frame", "map")  # 目标坐标系（通常是地图） / Target frame (usually map)
+        self.use_latest_tf = rospy.get_param("~use_latest_tf", True)  # 使用最新TF变换 / Use latest TF transform
+        self.depth_mode = rospy.get_param("~depth_mode", "z")  # 深度模式：z或range / Depth mode: z or range
+        
+        # 打印配置信息 / Print configuration info
         rospy.loginfo(f"[YOLO] RGB topic: {self.rgb_topic}")
         rospy.loginfo(f"[YOLO] Depth topic: {self.depth_topic}")
         rospy.loginfo(f"[YOLO] Target frame: {self.target_frame}")
         rospy.loginfo(f"[YOLO] Use latest TF: {self.use_latest_tf}")
         rospy.loginfo(f"[YOLO] Depth mode: {self.depth_mode} (z|range)")
 
-        # TF2 listener
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        # TF2坐标变换监听器 / TF2 transform listener
+        self.tf_buffer = tf2_ros.Buffer()  # TF缓冲区 / TF buffer
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)  # TF监听器 / TF listener
 
-        # FishPoly camera calibration parameters
+        # FishPoly鱼眼相机标定参数（从Odin1获取） / FishPoly fisheye camera calibration parameters (from Odin1)
+        # 这些参数用于将像素坐标和深度值反投影到3D空间 / These parameters are used to unproject pixel coordinates and depth to 3D space
         self.cam_params = {
-            "image_width": 1600,
-            "image_height": 1296,
+            "image_width": 1600,    # 图像宽度 / Image width
+            "image_height": 1296,   # 图像高度 / Image height
+            # FishPoly多项式系数 k2-k7 / FishPoly polynomial coefficients k2-k7
             "k2": 2.2386681497553868e-02,
             "k3": -1.1005721600958770e-01,
             "k4": 1.9889594376167404e-01,
             "k5": -2.2469360826066142e-01,
             "k6": 1.2659501421970656e-01,
             "k7": -2.9594663777173985e-02,
-            "p1": 0.0,
+            "p1": 0.0,  # 切向畸变参数 / Tangential distortion
             "p2": 0.0,
-            "A11": 7.3118660487066472e02,
-            "A12": -3.1721597080498198e-01,
-            "A22": 7.3103919402862072e02,
-            "u0": 8.1792273080715278e02,
-            "v0": 6.7415986395892662e02,
-            "maxIncidentAngle": 120,
+            # 相机内参矩阵参数 / Camera intrinsic matrix parameters
+            "A11": 7.3118660487066472e02,  # fx
+            "A12": -3.1721597080498198e-01,  # skew
+            "A22": 7.3103919402862072e02,  # fy
+            "u0": 8.1792273080715278e02,  # cx (主点x坐标 / principal point x)
+            "v0": 6.7415986395892662e02,  # cy (主点y坐标 / principal point y)
+            "maxIncidentAngle": 120,  # 最大入射角（度） / Maximum incident angle (degrees)
         }
 
-        # depth image cache (None until first depth message received)
+        # 深度图缓存（初始为None，收到第一帧深度图后更新） / Depth image cache (None until first depth message received)
         self.depth_image = None
 
-        # camera extrinsics Tcl (camera to lidar/body) - O1-N090100030
+        # 相机外参 Tcl (camera to lidar/body) - Odin1特定型号的标定参数
+        # Camera extrinsics Tcl (camera to lidar/body) - Calibration for specific Odin1 model
+        # 型号 / Model: O1-N090100030
         self.Tcl = np.array(
             [
-                [-0.01476, -0.99983, -0.01096, 0.04354],
-                [0.00604, 0.01087, -0.99992, -0.01748],
-                [0.99987, -0.01482, 0.00588, -0.02099],
-                [0, 0, 0, 1],
+                [-0.01476, -0.99983, -0.01096, 0.04354],  # 旋转矩阵第1行+平移x / Rotation matrix row 1 + translation x
+                [0.00604, 0.01087, -0.99992, -0.01748],   # 旋转矩阵第2行+平移y / Rotation matrix row 2 + translation y
+                [0.99987, -0.01482, 0.00588, -0.02099],   # 旋转矩阵第3行+平移z / Rotation matrix row 3 + translation z
+                [0, 0, 0, 1],  # 齐次坐标 / Homogeneous coordinates
             ],
             dtype=np.float32,
         )
 
-        # select message type based on topic suffix (support /compressed)
+        # 根据话题名称选择消息类型（支持/compressed压缩格式） / Select message type based on topic name (support /compressed)
         rgb_msg_type = (
             CompressedImage if self.rgb_topic.endswith("/compressed") else Image
         )
+        
+        # 订阅RGB图像话题 / Subscribe to RGB image topic
         self.image_sub = rospy.Subscriber(
             self.rgb_topic,
             rgb_msg_type,
             self.image_callback,
             queue_size=1,
-            buff_size=2**24,
+            buff_size=2**24,  # 16MB缓冲区，防止图像丢失 / 16MB buffer to prevent image loss
         )
+        
+        # 订阅深度图话题 / Subscribe to depth image topic
         self.depth_sub = rospy.Subscriber(
             self.depth_topic, Image, self.depth_callback, queue_size=1, buff_size=2**24
         )
 
+        # 发布检测结果（2D边界框） / Publish detection results (2D bounding boxes)
         self.detection_pub = rospy.Publisher(
             "/yolo_detections", Detection2DArray, queue_size=1
         )
+        
+        # 发布3D检测结果（物体的3D位置） / Publish 3D detection results (3D positions of objects)
         self.detection3d_pub = rospy.Publisher(
             "/yolo_detections_3d", Detection3DArray, queue_size=1
         )
+        
+        # 发布调试图像（带标注的检测结果） / Publish debug image (annotated detection results)
         self.debug_pub = rospy.Publisher("/yolo_debug_image", Image, queue_size=1)
+        
+        # 发布速度控制指令（用于自动导航模式） / Publish velocity commands (for auto navigation mode)
         self.cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+        
+        # 发布类别名称映射（latched话题，订阅者可随时获取最新值） / Publish class name mapping (latched topic)
         self.class_names_pub = rospy.Publisher(
             "/yolo_class_names", String, queue_size=1, latch=True
         )
 
-        # publish class name mapping (latched topic, subscribers can get the latest value)
+        # 发布类别名称映射为JSON格式 / Publish class name mapping in JSON format
         import json
 
-        # ensure class names are strings
+        # 确保类别名称为字符串类型 / Ensure class names are strings
         if isinstance(self.names, dict):
             class_mapping = {str(k): str(v) for k, v in self.names.items()}
         else:
@@ -145,7 +196,7 @@ class YoloDetector:
         self.class_names_pub.publish(json.dumps(class_mapping))
 
         rospy.loginfo(f"YOLO detector initialized with {len(self.names)} classes.")
-        rospy.loginfo(f"Classes: {list(self.names)[:10]}...")
+        rospy.loginfo(f"Classes: {list(self.names)[:10]}...")  # 打印前10个类别 / Print first 10 classes
 
     def letterbox(
         self,

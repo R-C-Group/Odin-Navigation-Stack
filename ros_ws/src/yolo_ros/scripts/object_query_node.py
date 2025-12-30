@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 '''
+目标查询与导航节点 - 实现自然语言指令解析与语义导航
+Object Query and Navigation Node - Implements Natural Language Instruction Parsing and Semantic Navigation
+
 Copyright 2025 Manifold Tech Ltd.(www.manifoldtech.com.co)
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +31,7 @@ import time
 import os
 from contextlib import contextmanager
 
-# Speech recognition dependency (optional)
+# 语音识别依赖检查（可选功能）/ Speech recognition dependency check (optional)
 try:
     from vosk import Model as VoskModel, KaldiRecognizer
     import sounddevice as sd
@@ -40,23 +43,34 @@ except Exception:
 
 
 class ObjectQueryNode:
+    """
+    目标查询节点类
+    Object Query Node Class
+    
+    功能 / Functions:
+    1. 接收YOLO发布的3D检测结果 / Eliminate 3D detection results from YOLO
+    2. 解析自然语言指令（中英文）/ Parse natural language commands (CN/EN)
+    3. 查找并在RViz中标记目标 / Find and mark targets in RViz
+    4. 计算相对目标位置并发布导航点 / Calculate relative target position and publish navigation goal
+    5. 支持语音交互（可选）/ Support voice interaction (optional)
+    """
     def __init__(self):
         rospy.init_node("object_query_node", anonymous=True)
 
-        # Store the latest test results
-        self.latest_detections = None  # 3D
-        self.latest_detections_2d = None  # 2D
-        self.class_names = {}
-        self.lock = threading.Lock()
+        # 存储最新的检测结果 / Store latest detection results
+        self.latest_detections = None  # 3D检测结果 / 3D detections
+        self.latest_detections_2d = None  # 2D检测结果（备用） / 2D detections (fallback)
+        self.class_names = {}  # 类别名称映射 / Class name mapping
+        self.lock = threading.Lock()  # 线程锁 / Thread lock
 
-        # Subscribe to 3D detection results
+        # 订阅3D检测结果话题 / Subscribe to 3D detection results
         rospy.Subscriber(
             "/yolo_detections_3d",
             Detection3DArray,
             self.detections_callback,
             queue_size=10,
         )
-        # Subscribe to 2D detection results (fallback for list display when no depth)
+        # 订阅2D检测结果（当无深度信息时用于列表显示） / Subscribe to 2D results (fallback list display)
         rospy.Subscriber(
             "/yolo_detections",
             Detection2DArray,
@@ -64,44 +78,46 @@ class ObjectQueryNode:
             queue_size=10,
         )
 
-        # Subscribe to class names
+        # 订阅类别名称映射 / Subscribe to class names
         rospy.Subscriber("/yolo_class_names", String, self.class_names_callback)
 
-        # Publish RViz markers
+        # 发布RViz标记（可视化检测到的物体） / Publish RViz markers (visualize detected objects)
         self.marker_pub = rospy.Publisher("/object_markers", MarkerArray, queue_size=10)
 
-        # Publish query results (optional, for other nodes to subscribe)
+        # 发布查询结果（JSON格式，供其他节点使用） / Publish query results (JSON format)
         self.result_pub = rospy.Publisher("/object_query_result", String, queue_size=10)
 
-        # Publish navigation goal point visualization
+        # 发布导航目标点标记（可视化红箭头） / Publish navigation goal marker (visual red arrow)
         self.goal_marker_pub = rospy.Publisher(
             "/navigation_goal_marker", Marker, queue_size=10
         )
 
-        # Publish navigation goal to move_base_simple/goal
+        # 发布导航目标点（发送给map_planner） / Publish navigation goal (to map_planner)
         self.goal_pub = rospy.Publisher(
             "/move_base_simple/goal", PoseStamped, queue_size=10
         )
 
-        # TF listener (for coordinate conversion)
+        # TF监听器（用于坐标转换） / TF listener (for coordinate conversion)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
-        # Navigation parameters
+        # 导航参数配置 / Navigation parameters configuration
         self.direction_distance = rospy.get_param(
             "~direction_distance", 1.0
-        )  # Directional offset distance (meters)
+        )  # 方向偏移距离（米），例如"右边1米" / Directional offset distance (meters)
         self.camera_frame = rospy.get_param("~camera_frame", "camera_link")
         self.target_frame = rospy.get_param("~target_frame", "map")
-        self.base_frame = rospy.get_param("~base_frame", "odin1_base_link")
-        # Home/Return origin instruction configuration
+        self.base_frame = rospy.get_param("~base_frame", "odin1_base_link")  # 机器人基座坐标系 / Robot base frame
+        
+        # 返航指令配置 / Return-to-home configuration
         self.home_frame = rospy.get_param(
             "~home_frame", "odom"
-        )  # Default publish to odom origin
+        )  # 默认发布到odom原点 / Default origin
         self.home_x = float(rospy.get_param("~home_x", 0.0))
         self.home_y = float(rospy.get_param("~home_y", 0.0))
-        self.home_yaw = float(rospy.get_param("~home_yaw", 0.0))  # Radians, can be 0
-        # Voice parameters
+        self.home_yaw = float(rospy.get_param("~home_yaw", 0.0))  # 弧度 / Radians
+
+        # 语音参数 / Voice parameters
         self.enable_voice = rospy.get_param("~enable_voice", False)
         self.voice_model_path = rospy.get_param(
             "~voice_model_path", rospy.get_param("~voice_model", "./voicemodel")
@@ -110,19 +126,20 @@ class ObjectQueryNode:
         self.voice_block_size = int(rospy.get_param("~voice_block_size", 4000))
         self.voice_device = rospy.get_param("~voice_device", None)
         self.voice_interval_sec = float(rospy.get_param("~voice_interval_sec", 3.0))
-        # voice endpoint control
+        
+        # 语音端点检测控制 / Voice endpoint control
         self.voice_end_silence = float(
             rospy.get_param("~voice_end_silence", 0.8)
-        )  # continuous silence threshold, determine end of sentence
+        )  # 持续静音阈值（秒），判定句子结束 / Silence threshold to determine end of sentence
         self.voice_min_duration = float(
             rospy.get_param("~voice_min_duration", 1.2)
-        )  # minimum sentence duration
+        )  # 最小句子时长 / Minimum sentence duration
         self.voice_max_duration = float(
             rospy.get_param("~voice_max_duration", 4.0)
-        )  # maximum sentence duration
+        )  # 最大句子时长 / Maximum sentence duration
         self.voice_debounce = float(
             rospy.get_param("~voice_debounce", 1.5)
-        )  # cooldown after one recognition
+        )  # 两次识别间的冷却时间 / Cooldown after recognition
         self.voice_partial = bool(rospy.get_param("~voice_partial", False))
         self._voice_thread = None
         self._voice_stop = threading.Event()
@@ -200,8 +217,15 @@ class ObjectQueryNode:
 
     def find_object(self, object_name):
         """
+        查找指定名称的物体
         Find objects with the specified name
-        Returns: [(class_id, class_name, x, y, z, score), ...]
+        
+        参数 / Parameters:
+            object_name: 目标物体名称（支持中文或英文，支持模糊匹配）/ Target object name
+            
+        返回 / Returns:
+            [(class_id, class_name, x, y, z, score), ...]
+            返回所有匹配的物体列表，坐标已转换为 map 坐标系
         """
         with self.lock:
             if not self.class_names:
@@ -212,7 +236,7 @@ class ObjectQueryNode:
                 rospy.logwarn("No detections received yet.")
                 return []
 
-            # find object, support partial match and case-insensitive
+            # 查找物体，支持部分匹配和忽略大小写 / Find object, support partial match and case-insensitive
             object_name_lower = object_name.lower().strip()
             found_objects = []
 
@@ -224,20 +248,23 @@ class ObjectQueryNode:
                         str(class_id), f"unknown_{class_id}"
                     )
 
-                    # ensure class_name is string
+                    # 确保类别名是字符串 / Ensure class_name is string
                     class_name_str = str(class_name)
 
-                    # check name match
+                    # 检查名称匹配 / Check name match
                     if object_name_lower in class_name_str.lower():
-                        # original in camera frame
+                        # 原始坐标在相机坐标系下 / Original in camera frame
                         x_cam = detection.bbox.center.position.x
                         y_cam = detection.bbox.center.position.y
                         z_cam = detection.bbox.center.position.z
-                        # transform to map frame
+                        
+                        # 转换到地图坐标系 / Transform to map frame
                         map_pos = self.transform_camera_to_map((x_cam, y_cam, z_cam))
                         if map_pos is None:
                             continue
                         x_map, y_map, z_map = map_pos
+                        
+                        # 添加到结果列表 / Add to result list
                         found_objects.append(
                             (class_id, class_name_str, x_map, y_map, z_map, score)
                         )
@@ -353,14 +380,26 @@ class ObjectQueryNode:
 
     def parse_navigation_command(self, command):
         """
-        Parse natural language navigation commands, supporting simplified keywords and number selection (1-5).
-        Returns: (action, object_name, direction, index) or None
-        Note: index is 1-based (None means default nearest)
+        解析自然语言导航指令
+        Parse natural language navigation commands
+        
+        支持格式 / Supported formats:
+        1. "Move to the right of the person"
+        2. "走到第2个椅子的后面"
+        
+        参数 / Parameters: Command string
+        
+        返回 / Returns:
+            (action, object_name, direction, index) or None
+            - action: 动作类型 ("move")
+            - object_name: 目标物体名称
+            - direction: 相对方位 (left/right/front/behind)
+            - index: 索引 (1-based, 1表示第一个, None表示最近的)
         """
         cmd_raw = command.strip()
         cmd = cmd_raw.lower()
 
-        # Support direction keywords (includes abbreviations and synonyms)
+        # 支持的方向关键词字典 / Direction keywords dictionary
         directions = {
             "right": "right",
             "r": "right",
@@ -373,7 +412,7 @@ class ObjectQueryNode:
             "back": "behind",
             "b": "behind",
         }
-        # Support Chinese direction keywords
+        # 中文方向关键词 / Chinese direction keywords
         cn_directions = {
             "右边": "right",
             "右面": "right",
@@ -385,7 +424,7 @@ class ObjectQueryNode:
             "后面": "behind",
         }
 
-        # Find direction (any occurrence is valid)
+        # 1. 查找方向词 / Find direction
         found_direction = None
         for k, v in directions.items():
             if re.search(r"\b" + re.escape(k) + r"\b", cmd):
@@ -400,34 +439,36 @@ class ObjectQueryNode:
         if not found_direction:
             return None
 
-        # Extract number (optional, max 1-5): supports #2, no.2, 2nd, second, 第2个, 第三 等
+        # 2. 提取数字索引 (1-5) / Extract number index
         index = None
         ordinals = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
+        # 英文序数词处理
         for word, num in ordinals.items():
             if re.search(r"\b" + word + r"\b", cmd):
                 index = num
                 break
         if index is None:
+            # 处理 #2, no.2
             m = re.search(r"(?:#|no\.?\s*)([1-5])", cmd)
             if m:
                 index = int(m.group(1))
         if index is None:
+            # 处理 1st, 2nd
             m = re.search(r"\b([1-5])(st|nd|rd|th)\b", cmd)
             if m:
                 index = int(m.group(1))
         if index is None:
+            # 处理中文 "第N个"
             m = re.search(r"第\s*([一二三四五1-5])\s*个?", cmd_raw)
             if m:
                 ch = m.group(1)
                 cn_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5}
                 index = cn_map.get(ch, None) if ch in cn_map else int(ch)
 
-        # Extract object name:
-        # 1) Prioritize extracting from "of (the) <multi words>" until number or string ends
-        # 1b) Chinese: Extract "到/去到/走到/移动到/运动到 … 的 <direction>" to extract …
-        # 2) Otherwise match known classes (from self.class_names), prioritize longest match
+        # 3. 提取物体名称 / Extract object name
         object_name = None
 
+        # 获取已知的所有类别名，按长度排序（优先匹配长词组合）
         # Known class names (from model mapping), sorted by length, prioritize multi-word names
         known_names = []
         try:
@@ -435,7 +476,8 @@ class ObjectQueryNode:
                 known_names = [str(v).lower() for v in self.class_names.values()]
         except Exception:
             known_names = []
-        # Common fallback names (multi-word)
+        
+        # 常见物体名称补充列表（COCO类别）
         fallback_names = [
             "person",
             "bottle",
@@ -496,12 +538,12 @@ class ObjectQueryNode:
         for n in fallback_names:
             if n not in known_names:
                 known_names.append(n)
-        # Unique and sort by length, prioritize multi-word names
+        # 去重并排序
         known_names = sorted(
             list(dict.fromkeys(known_names)), key=lambda s: len(s), reverse=True
         )
 
-        # Chinese object mapping (fixed words)
+        # 中文物体映射表 (COCO常见类别)
         cn_obj_map = {
             "人": "person",
             "瓶子": "bottle",
@@ -562,7 +604,8 @@ class ObjectQueryNode:
             "行李箱": "suitcase",
             "凳子": "bench",
         }
-        # First try Chinese mode: 到/去到/走到/移动到/运动到 [第N个] 物体 的 方向
+        
+        # 尝试匹配中文句式：到... [第N个] 物体 的 方向
         m_cn = re.search(
             r"(?:到|去到|走到|移动到|运动到)\s*(第\s*([一二三四五1-5])\s*个)?\s*([\u4e00-\u9fa5A-Za-z ]+?)的\s*(右边|右侧|左边|左侧|前边|前面|后边|后面)",
             cmd_raw,
@@ -573,7 +616,7 @@ class ObjectQueryNode:
                 cn_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5}
                 index = cn_map.get(ch, None) if ch in cn_map else int(ch)
             obj_phrase = m_cn.group(3).strip()
-            # Find longest match in Chinese mapping
+            # 在映射表中查找最长匹配
             chosen_cn = None
             for cn_name in sorted(
                 cn_obj_map.keys(), key=lambda s: len(s), reverse=True
@@ -584,48 +627,40 @@ class ObjectQueryNode:
             if chosen_cn:
                 object_name = cn_obj_map[chosen_cn]
 
-        # 1) of (the) <name...>
-        # Capture fragment up to number or string end
+        # 尝试匹配英文句式: 1) of (the) <name...>
         m = re.search(
             r"of\s+(?:the\s+)?([a-z0-9 _\-]+?)(?=\s*(?:#\d|no\.?\s*\d|\d(?:st|nd|rd|th)|第\s*\d\s*个|$))",
             cmd,
         )
         if m:
             candidate = re.sub(r"\s+", " ", m.group(1).strip())
-            # Process leading index: "第N个 name" / "#N name" / "no.N name" / "Nst|nd|rd|th name"
+            # 处理开头的索引描述
             if candidate:
-                # 第N个 name
                 m_idx = re.match(r"^第\s*([1-5])\s*个\s+", candidate)
                 if m_idx:
-                    if index is None:
-                        index = int(m_idx.group(1))
+                    if index is None: index = int(m_idx.group(1))
                     candidate = candidate[m_idx.end() :].strip()
                 else:
-                    # #N or no.N
                     m_idx = re.match(r"^(?:#|no\.?\s*)([1-5])\s+", candidate)
                     if m_idx:
-                        if index is None:
-                            index = int(m_idx.group(1))
+                        if index is None: index = int(m_idx.group(1))
                         candidate = candidate[m_idx.end() :].strip()
                     else:
-                        # Nst|nd|rd|th name
                         m_idx = re.match(r"^([1-5])(st|nd|rd|th)\s+", candidate)
                         if m_idx:
-                            if index is None:
-                                index = int(m_idx.group(1))
+                            if index is None: index = int(m_idx.group(1))
                             candidate = candidate[m_idx.end() :].strip()
-            # Find longest match in known names
+            # 查找匹配的已知名称
             for name in known_names:
                 if candidate and candidate in name:
                     object_name = name
                     break
             if object_name is None and candidate:
-                object_name = candidate  # Fallback to original fragment
+                object_name = candidate  # 如果没有完全匹配，使用原片段
 
-        # 2) If not matched, search for known classes in full sentence (prioritize multi-word long names)
+        # 2) 如果未找到，全局搜索已知类别名
         if not object_name:
             for name in known_names:
-                # Use word boundary match: replace spaces in name with \\s+ to handle multiple spaces
                 pat = r"\b" + re.sub(r"\s+", r"\\s+", re.escape(name)) + r"\b"
                 if re.search(pat, cmd):
                     object_name = name
@@ -674,18 +709,26 @@ class ObjectQueryNode:
         self, object_pos_map, direction, distance
     ):
         """
+        计算相对于机器人自身的导航目标点（基于物体位置和方位）
         Calculate target position relative to robot in base_link frame based on object position and direction
-
-        Rules (base_link frame, ROS standard):
-        - front: x += d
-        - behind: x -= d
-        - left: y += d
-        - right: y -= d
-
+        
+        工作逻辑 / Logic:
+        1. "物体的前方"通常是指相对于机器人视角的"物体前方"（即物体和机器人之间）
+           或者按照全局坐标系定义的"前方"。这里采用相对于机器人底盘朝向的定义。
+           "front" means offset towards the robot along the robot-object line, or based on robot frame.
+           
+        规则（基于base_link系）/ Rules (base_link frame, ROS standard):
+        - front: x += d (向前偏移)
+        - behind: x -= d (向后偏移)
+        - left: y += d (向左偏移)
+        - right: y -= d (向右偏移)
+        
+        实现：将底盘(base_link)的单位方向向量旋转到地图(map)坐标系，然后叠加到物体位置上。
         Implementation: rotate base_link unit axis vectors to map frame, as offset direction base.
         """
         x_obj, y_obj, z_obj = object_pos_map
         try:
+            # 获取 map -> base_link 的变换 / Get map -> base_link transform
             tf = self.tf_buffer.lookup_transform(
                 self.target_frame,  # map
                 self.base_frame,  # base_link
@@ -696,6 +739,7 @@ class ObjectQueryNode:
             rospy.logwarn(
                 f"Failed to get {self.target_frame}->{self.base_frame} transform, using map direction offset: {e}"
             )
+            # 如果TF失败，回退到使用纯Map坐标系的偏移计算
             return self.calculate_target_position_in_map(
                 object_pos_map, direction, distance
             )
@@ -703,21 +747,26 @@ class ObjectQueryNode:
         q = tf.transform.rotation
         R = self.quaternion_to_rotation_matrix(
             q.x, q.y, q.z, q.w
-        )  # 3x3, from base to map
-        ex_map = np.array([R[0][0], R[1][0], 0.0])  # base x axis in map
-        ey_map = np.array([R[0][1], R[1][1], 0.0])  # base y axis in map
+        )  # 3x3矩阵，表示base相对于map的旋转 / Rotation matrix from base to map
+        
+        # 计算base坐标系的X轴和Y轴在map坐标系中的方向向量
+        ex_map = np.array([R[0][0], R[1][0], 0.0])  # base x axis in map (forward)
+        ey_map = np.array([R[0][1], R[1][1], 0.0])  # base y axis in map (left)
 
         dx, dy = 0.0, 0.0
         if direction == "front":
-            dx = distance
+            dx = distance  # 机器人前方
         elif direction == "behind":
-            dx = -distance
+            dx = -distance # 机器人后方
         elif direction == "left":
-            dy = distance
+            dy = distance  # 机器人左方
         elif direction == "right":
-            dy = -distance
+            dy = -distance # 机器人右方
 
+        # 计算偏移向量 = dx * front_vec + dy * left_vec
         offset_map = dx * ex_map + dy * ey_map
+        
+        # 最终目标点 = 物体位置 + 偏移向量
         target = (x_obj + float(offset_map[0]), y_obj + float(offset_map[1]), z_obj)
         return target
 
@@ -985,19 +1034,21 @@ class ObjectQueryNode:
 
     def process_navigation_command(self, command):
         """
+        处理导航指令并发送目标点到 move_base_simple/goal
         Process navigation command and send goal to move_base_simple/goal
-
-        Parameters:
-            command: Natural language command, e.g. "Move to the right of the person"
-
-        Returns:
+        
+        参数 / Parameters:
+            command: 自然语言指令 / Natural language command
+            例如: "Move to the right of the person"
+            
+        返回 / Returns:
             True if successful, False if failed
         """
         print(f"\n{'='*60}")
         print(f"Processing navigation command: '{command}'")
         print(f"{'='*60}")
 
-        # 1. Parse command
+        # 1. 解析指令 / Parse command
         parsed = self.parse_navigation_command(command)
         if not parsed:
             print("Failed to parse command")
@@ -1020,20 +1071,19 @@ class ObjectQueryNode:
         if index:
             print(f"  - Index: {index}")
 
-        # Find object (returns map frame position)
+        # 2. 查找物体（返回Map坐标系位置） / Find object (returns map frame position)
         objects = self.find_object(object_name)
         if not objects:
             print(f"Object '{object_name}' not found")
             return False
 
-        # Sort objects by distance (closest first)
+        # 3. 按距离排序（最近优先） / Sort objects by distance (closest first)
         def obj_dist_sq(o):
-            # o = (class_id, class_name, x, y, z, score)
-            return o[2] ** 2 + o[3] ** 2
+            return o[2] ** 2 + o[3] ** 2  # x^2 + y^2
 
         objects = sorted(objects, key=obj_dist_sq)
 
-        # Select target: if index (1-5) is provided, select corresponding item, otherwise default to nearest (1st)
+        # 4. 选择目标：如果有索引则选指定第几个，否则默认最近的 / Select target
         if index is not None and 1 <= index <= 5 and index <= len(objects):
             chosen = objects[index - 1]
         else:
@@ -1043,7 +1093,7 @@ class ObjectQueryNode:
         print(f"  - Map frame position: ({x_map:.2f}, {y_map:.2f}, {z_map:.2f})")
         print(f"  - Confidence: {score:.2f}")
 
-        # Calculate target position (offset from object in robot frame)
+        # 5. 计算最终导航目标点 / Calculate final navigation target position
         target_map = self.calculate_target_position_relative_to_robot(
             (x_map, y_map, z_map), direction, self.direction_distance
         )
@@ -1054,7 +1104,7 @@ class ObjectQueryNode:
             f"  - Target position: ({target_map[0]:.2f}, {target_map[1]:.2f}, {target_map[2]:.2f})"
         )
 
-        # Send navigation goal
+        # 6. 发送导航目标 / Send navigation goal
         success = self.send_navigation_goal(target_map)
         if success:
             print(f"\nNavigation goal sent to /move_base_simple/goal")

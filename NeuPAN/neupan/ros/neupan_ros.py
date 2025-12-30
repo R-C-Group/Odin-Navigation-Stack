@@ -1,5 +1,13 @@
 """
-neupan_core is the main class for the neupan_ros package. It is used to run the NeuPAN algorithm in the ROS framework, which subscribes to the laser scan and localization information, and publishes the velocity command to the robot.
+NeuPAN ROS节点 - 神经网络路径跟随与避障规划器
+NeuPAN ROS Node - Neural Network Path Following and Obstacle Avoidance Planner
+
+neupan_core是neupan_ros包的主类，用于在ROS框架中运行NeuPAN算法。
+它订阅激光扫描和定位信息，并向机器人发布速度指令。
+
+neupan_core is the main class for the neupan_ros package. It is used to run the 
+NeuPAN algorithm in the ROS framework, which subscribes to the laser scan and 
+localization information, and publishes the velocity command to the robot.
 
 Developed by Ruihua Han
 Copyright (c) 2025 Ruihua Han <hanrh@connect.hku.hk>
@@ -42,18 +50,41 @@ import sensor_msgs.point_cloud2 as pc2
 
 
 class neupan_core:
+    """
+    NeuPAN核心类：端到端神经网络局部规划器
+    NeuPAN core class: end-to-end neural network local planner
+    
+    功能 / Functions:
+    - 订阅激光雷达扫描数据 / Subscribe to laser scan data
+    - 订阅机器人定位信息 / Subscribe to robot localization
+    - 使用神经网络进行路径规划和避障 / Use neural network for path planning and obstacle avoidance
+    - 发布速度控制指令 / Publish velocity commands
+    """
+    
     def __init__(self) -> None:
+        """
+        初始化NeuPAN ROS节点
+        Initialize NeuPAN ROS node
+        
+        配置步骤 / Configuration steps:
+        1. 加载YAML配置文件 / Load YAML configuration
+        2. 初始化NeuPAN神经规划器 / Initialize NeuPAN neural planner
+        3. 设置ROS发布者和订阅者 / Set up ROS publishers and subscribers
+        """
 
         rospy.init_node("neupan_node", anonymous=True)
 
+        # 加载配置文件 / Load configuration file
         config_path = os.path.join(os.path.dirname(__file__), "configs", "config.yaml")
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
         logger.info(f"Configuration:\n {yaml.dump(self.config)}")
 
-        self.scan_angle_range = np.array(self.config["scan_angle"], dtype=np.float32)
-        self.scan_range = np.array(self.config["scan_range"], dtype=np.float32)
+        # 激光扫描参数配置 / Laser scan parameters configuration
+        self.scan_angle_range = np.array(self.config["scan_angle"], dtype=np.float32)  # 扫描角度范围 / Scan angle range
+        self.scan_range = np.array(self.config["scan_range"], dtype=np.float32)  # 扫描距离范围 / Scan distance range
 
+        # 初始化NeuPAN神经网络规划器 / Initialize NeuPAN neural network planner
         pan = {"dune_checkpoint": self.config["dune_checkpoint"]}
         self.neupan_planner = neupan.init_from_yaml(
             os.path.abspath(
@@ -64,51 +95,53 @@ class neupan_core:
             pan=pan,
         )
 
-        # data
-        self.obstacle_points = None  # (2, n)  n number of points
-        self.robot_state = None  # (3, 1) [x, y, theta]
-        self.stop = False
+        # 数据存储 / Data storage
+        self.obstacle_points = None  # (2, n) 障碍物点云，n为点数 / Obstacle point cloud, n is number of points
+        self.robot_state = None  # (3, 1) 机器人状态 [x, y, theta] / Robot state [x, y, theta]
+        self.stop = False  # 停止标志 / Stop flag
 
-        # publisher
+        # ROS发布者 / ROS publishers
         self.vel_pub = rospy.Publisher(
             self.config["topic"]["cmd_vel"], Twist, queue_size=10
-        )
-        self.plan_pub = rospy.Publisher("/neupan_plan", Path, queue_size=10)
+        )  # 发布速度指令 / Publish velocity commands
+        self.plan_pub = rospy.Publisher("/neupan_plan", Path, queue_size=10)  # 发布规划路径 / Publish planned path
         self.ref_state_pub = rospy.Publisher(
             "/neupan_ref_state", Path, queue_size=10
-        )  # current reference state
+        )  # 发布当前参考状态 / Publish current reference state
         self.ref_path_pub = rospy.Publisher(
             "/neupan_initial_path", Path, queue_size=10
-        )  # initial path
+        )  # 发布初始路径 / Publish initial path
 
-        ## for rviz visualization
+        # RViz可视化发布者 / RViz visualization publishers
         self.point_markers_pub_dune = rospy.Publisher(
             "/dune_point_markers", MarkerArray, queue_size=10
-        )
-        self.robot_marker_pub = rospy.Publisher("/robot_marker", Marker, queue_size=10)
+        )  # DUNE采样点 / DUNE sample points
+        self.robot_marker_pub = rospy.Publisher("/robot_marker", Marker, queue_size=10)  # 机器人标记 / Robot marker
         self.point_markers_pub_nrmp = rospy.Publisher(
             "/nrmp_point_markers", MarkerArray, queue_size=10
-        )
-        self.arrive_pub = rospy.Publisher(self.config['topic']['arrive'], Empty, queue_size=1)
-        self.last_arrive_flag: bool = False
+        )  # NRMP采样点 / NRMP sample points
+        self.arrive_pub = rospy.Publisher(self.config['topic']['arrive'], Empty, queue_size=1)  # 到达目标信号 / Arrival signal
+        self.last_arrive_flag: bool = False  # 上一次到达标志 / Last arrival flag
 
+        # TF坐标变换监听器 / TF transform listener
         self.listener = tf.TransformListener()
 
-        # subscriber
-        rospy.Subscriber(self.config["topic"]["scan"], LaserScan, self.scan_callback)
+        # ROS订阅者 / ROS subscribers
+        rospy.Subscriber(self.config["topic"]["scan"], LaserScan, self.scan_callback)  # 订阅激光扫描 / Subscribe to laser scan
 
-        # three types of initial path:
-        # 1. from given path
-        # 2. from waypoints
-        # 3. from goal position
+        # 三种初始路径输入方式 / Three types of initial path input:
+        # 1. 从给定路径 / From given path
+        # 2. 从路点列表 / From waypoints
+        # 3. 从目标位置 / From goal position
         rospy.Subscriber(self.config["topic"]["path"], Path, self.path_callback)
         rospy.Subscriber(
             self.config["topic"]["waypoints"], Path, self.waypoints_callback
         )
         rospy.Subscriber(self.config["topic"]["goal"], PoseStamped, self.goal_callback)
 
-        rospy.Subscriber("/neupan/q_s", Float32, self.qs_callback)
-        rospy.Subscriber("/neupan/p_u", Float32, self.pu_callback)
+        # 动态参数调整订阅者 / Dynamic parameter adjustment subscribers
+        rospy.Subscriber("/neupan/q_s", Float32, self.qs_callback)  # 平滑性权重 / Smoothness weight
+        rospy.Subscriber("/neupan/p_u", Float32, self.pu_callback)  # 控制权重 / Control weight
 
     def qs_callback(self, msg):
         logger.info(f"Update q_s to {msg.data}")
@@ -119,19 +152,30 @@ class neupan_core:
         self.neupan_planner.update_adjust_parameters(p_u=float(msg.data))
 
     def run(self):
+        """
+        主运行循环：执行路径规划和速度控制
+        Main run loop: executes path planning and velocity control
+        
+        流程 / Process:
+        1. 获取机器人位姿（通过TF） / Get robot pose (via TF)
+        2. 获取障碍物点云 / Get obstacle point cloud
+        3. 调用NeuPAN神经规划器 / Call NeuPAN neural planner
+        4. 发布速度指令和可视化信息 / Publish velocity commands and visualizations
+        """
 
-        r = rospy.Rate(50)
+        r = rospy.Rate(50)  # 50Hz控制频率 / 50Hz control frequency
 
         while not rospy.is_shutdown():
 
             try:
+                # 通过TF获取机器人在地图坐标系中的位姿 / Get robot pose in map frame via TF
                 (trans, rot) = self.listener.lookupTransform(
-                    self.config["frame"]["map"],
-                    self.config["frame"]["base"],
-                    rospy.Time(0),
+                    self.config["frame"]["map"],  # 目标坐标系：地图 / Target frame: map
+                    self.config["frame"]["base"],  # 源坐标系：机器人底盘 / Source frame: robot base
+                    rospy.Time(0),  # 最新的变换 / Latest transform
                 )
 
-                yaw = self.quat_to_yaw_list(rot)
+                yaw = self.quat_to_yaw_list(rot)  # 四元数转欧拉角 / Quaternion to Euler
                 x, y = trans[0], trans[1]
                 self.robot_state = np.array([x, y, yaw]).reshape(3, 1)
 
@@ -158,12 +202,12 @@ class neupan_core:
                 "robot state received {}".format(self.robot_state.tolist())
             )
 
+            # 如果有路点但没有初始路径，从当前位置生成初始路径 / If waypoints exist but no initial path, generate from current position
             if (
                 len(self.neupan_planner.waypoints) >= 1
                 and self.neupan_planner.initial_path is None
             ):
                 self.neupan_planner.set_initial_path_from_state(self.robot_state)
-                # print('set initial path', self.neupan_planner.initial_path)
 
             if self.neupan_planner.initial_path is None:
                 rospy.logwarn_throttle(3, "waiting for neupan initial path")
@@ -183,6 +227,7 @@ class neupan_core:
             if not self.last_arrive_flag:
                 t_start = time.time()
 
+            # 调用NeuPAN规划器：输入机器人状态和障碍物，输出速度指令 / Call NeuPAN planner: input robot state and obstacles, output velocity command
             action, info = self.neupan_planner(self.robot_state, self.obstacle_points)
 
             if not self.last_arrive_flag:
@@ -191,21 +236,23 @@ class neupan_core:
                     f"neupan planning time: {(t_end - t_start)*1000:.1f} ms"
                 )
 
-            self.stop = info["stop"]
-            self.arrive = info["arrive"]
+            self.stop = info["stop"]  # 碰撞停止标志 / Collision stop flag
+            self.arrive = info["arrive"]  # 到达目标标志 / Arrival flag
 
+            # 检测到达目标，发布到达信号 / Detect arrival, publish arrival signal
             if info["arrive"] and not self.last_arrive_flag:
                 self.arrive_pub.publish(Empty())
                 rospy.loginfo("arrive at the target")
 
             self.last_arrive_flag = info["arrive"]
 
-            # publish the path and velocity
-            self.plan_pub.publish(self.generate_path_msg(info["opt_state_list"]))
-            self.ref_state_pub.publish(self.generate_path_msg(info["ref_state_list"]))
+            # 发布路径和速度指令 / Publish path and velocity commands
+            self.plan_pub.publish(self.generate_path_msg(info["opt_state_list"]))  # 优化后的状态序列 / Optimized state sequence
+            self.ref_state_pub.publish(self.generate_path_msg(info["ref_state_list"]))  # 参考状态序列 / Reference state sequence
             if not info["arrive"] or not self.last_arrive_flag:
-                self.vel_pub.publish(self.generate_twist_msg(action))
+                self.vel_pub.publish(self.generate_twist_msg(action))  # 发布速度指令 / Publish velocity command
 
+            # 发布可视化标记 / Publish visualization markers
             self.point_markers_pub_dune.publish(self.generate_dune_points_markers_msg())
             self.point_markers_pub_nrmp.publish(self.generate_nrmp_points_markers_msg())
             self.robot_marker_pub.publish(self.generate_robot_marker_msg())
