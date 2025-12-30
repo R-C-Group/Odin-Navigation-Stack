@@ -21,20 +21,35 @@
 
 namespace model_planner {
 
+/**
+ * @struct DWATrajPoint
+ * @brief DWA 轨迹上的一个点
+ */
 struct DWATrajPoint {
-    Eigen::Vector2d pose;  // x, y in base frame
-    double theta;          // yaw
-    double time;           // time from start
+    Eigen::Vector2d pose;  // 机器人基座坐标系下的位置 (x, y)
+    double theta;          // 航向角 (yaw)
+    double time;           // 从轨迹起点开始的时间戳
     DWATrajPoint(double x=0, double y=0, double t=0, double ti=0) : pose(x,y), theta(t), time(ti) {}
 };
 
+/**
+ * @class DWAPlanner
+ * @brief 动态窗口法 (Dynamic Window Approach) 核心规划类
+ */
 class DWAPlanner {
 public:
     explicit DWAPlanner(const LocalCostmap& costmap);
 
     void initialize();
 
-    // plan returns true if a feasible command is found
+    /**
+     * @brief 执行 DWA 规划核心逻辑
+     * @param current_pose 当前位姿（局部坐标系，通常为 0）
+     * @param current_velocity 当前实时速度
+     * @param reference_path 局部参考路径（全局路径转换而来）
+     * @param cmd_vel 输出的最优控制指令 (v, 0, w)
+     * @return 如果找到可行解返回 true
+     */
     bool plan(const Eigen::Vector3d& current_pose,
               const Eigen::Vector3d& current_velocity,
               const std::vector<std::pair<float, float>>& reference_path,

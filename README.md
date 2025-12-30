@@ -203,4 +203,22 @@
 
 # 关于局部避障
 
-局部路径规划可以选择DWA（`navigation_planner.launch`和`model_planner.launch`）和NeuPAN(`whole.launch`)两种局部规划器
+局部路径规划可以选择DWA（`navigation_planner.launch`和`model_planner.launch`）和NeuPAN(`whole.launch`)两种局部规划器。
+
+关于model_planner中的dwa是自实现的，有以下优势：
+1. 引入了“障碍物衰减记忆机制” (Obstacle Decay)
+* 原版 DWA：标准的 ROS costmap_2d 只有两种状态（通过传感器清除或添加）。如果激光雷达有噪点或者是由于遮挡没能扫到之前的障碍物，地图可能会残留“鬼影”。
+* 改进：在 local_costmap.cpp 中引入了 decay_factor_（衰减因子）。每一帧更新前都会让旧代价值乘以 0.95。
+  * 优势：这让地图具有了“渐进式遗忘”的能力。能够非常优雅地处理动态障碍物（如走开的行人）留下的残影，且即便传感器有轻微噪点，也会迅速被衰减掉，不会让机器人莫名其妙地被困住。
+2. 航向对齐增强逻辑 (Heading Alignment Boost)
+* 原版 DWA：评分函数主要考虑距离路径的远近。当机器人朝向与主路径大幅偏离时，原版 DWA 有时会因为低速采样的评分不高而出现旋转极其缓慢或“原地打转”的现象。
+* 改进：在 dwa_planner.cpp 的评分函数中加入了 heading_boost_ 和 heading_align_thresh_。
+  * 优势：当检测到机器人朝向与目标点夹角过大时，系统会大幅提升“航向得分”的分量。这强迫机器人优先进行原地旋转快速对齐路径。这种“性格”的调整使得机器人在狭窄空间转向或调头时动作更利索。
+3. 轻量化与高性能设计
+* 原版 DWA：其架构为了兼容多层地图（Layered Costmap）和多态足迹（Polygon Footprint），代码量庞大且 TF 转换非常频繁，在嵌入式设备（如机载计算模块）上会有明显的 CPU 占用。
+* 本作改进：它抛弃了臃肿的 costmap_2d 依赖，直接在 LocalCostmap 类中手写了 Bresenham 线段清理算法 和 线性代值膨胀。
+  * 优势：这种“直接操作栅格内存”的方式效率极高。对于四足机器人（如 Unitree Go2）这种需要高频率指令更新的场景，它能保证在较低的算力消耗下维持 20Hz+ 的指令输出稳定性。
+4. 故障恢复逻辑的无缝集成
+* 原版 DWA：规划失败后需要通过 move_base 的状态机跳转到 RotateRecovery
+* 本作改进：在 plan 函数末尾直接集成了 enable_rotate_recovery_ 判断。
+  * 优势：它不是靠状态机跳转，而是直接在“找不到路径”的瞬间，原地计算一个指向路径分支的最优转角速度。这种“瞬时响应”让机器人的动态表现更加连贯，不会有明显的停顿。
