@@ -9,41 +9,171 @@
 
 <br>
 
+# 系统概述
+
 [Odin Navigation Stack](https://github.com/ManifoldTechLtd/Odin-Nav-Stack) 是一个基于ROS1 Noetic的四足机器人（Unitree Go2）自主导航系统。系统集成了高精度SLAM、语义目标检测、神经网络规划器和视觉语言模型，提供完整的室内外导航解决方案。
+
+一些关键点的Mark:
+* 基于模块式（Modular）及ROS1架构
+* 导航框架主要是依赖于[ros navigation](https://github.com/ros-planning/navigation)
+* 动态避障with smooth motion（完全开源）
+* 语义导航：通过语言或者键盘指令实现物体的检测、定位与导航（e.g., “Go to the left of the chair” 完全开源）
+* 采用多模态AI实现对环境的描述
 
 
 # 核心模块
-1. 感知层
-* odin_ros_driver: Odin1传感器驱动（提供RGB、深度、IMU、点云）
-  * SLAM定位和建图（内部算法，未开源）
-  * 实时重定位
-  * 多传感器同步
-* fish2pinhole: 鱼眼相机到针孔相机的图像转换
-  * 功能: 鱼眼相机图像矫正
-  * 输入: 鱼眼畸变的RGB和深度图
-  * 输出: 针孔相机模型的矫正图像
-  * 算法: FishPoly鱼眼投影模型
-* fake360: 360度视角生成
-* yolo_ros: YOLOv5目标检测与语义定位
-  * 功能: 基于YOLOv5的目标检测与3D定位
-2. 规划层
-* map_planner: 基于栅格地图的A*全局路径规划
-  * 算法: A*路径搜索 + 障碍物膨胀
-* model_planner: 自定义规划器（可配置全局和局部规划器）
-* navigation_planner: ROS标准导航栈封装
-* NeuPAN: 端到端神经网络局部规划器（独立Python包）
-  * 高效避障: 50Hz实时规划
-  * 动态障碍: 适应动态环境
-  * 平滑轨迹: 神经网络优化的运动轨迹
-3. 控制层
-* unitree_control: Unitree Go2速度控制接口
-4. 工具层
-* pcd2pgm: 点云地图转栅格地图
-* pointcloud_saver: 点云地图保存工具
-* odin_vlm_terminal: 视觉语言模型终端界面
+
+### 1. 感知层 Perception Layer
+
+#### 1.1 odin_ros_driver
+**功能**: Odin1传感器驱动程序  
+**输入**: Odin1硬件数据  
+**输出**:
+- `/odin1/camera_0/image_raw` - RGB图像
+- `/odin1/camera_0/depth` - 深度图
+- `/odin1/cloud` - 点云数据
+- `/odin1/imu` - IMU数据
+- `/tf` (map → odom → odin1_base_link) - 坐标变换
+
+**关键特性**:
+- SLAM定位和建图（内部算法，未开源）
+- 实时重定位
+- 多传感器同步
+
+#### 1.2 fish2pinhole
+**功能**: 鱼眼相机图像矫正  
+**输入**: 鱼眼畸变的RGB和深度图  
+**输出**: 针孔相机模型的矫正图像  
+**算法**: FishPoly鱼眼投影模型
+
+#### 1.3 yolo_ros
+**功能**: 基于YOLOv5的目标检测与3D定位  
+**主要文件**: `yolo_detector.py`  
+**输入**:
+- 矫正后的RGB图像
+- 深度图
+- 相机标定参数
+
+**输出**:
+- 检测到的物体类别和3D位置
+- 语音/文本导航指令解析
+
+**核心功能**:
+1. **目标检测**: YOLOv5模型推理
+2. **3D定位**: 深度图反投影 + 坐标变换
+3. **语义导航**: "移动到椅子左侧"等自然语言指令
+4. **语音识别**: 基于Vosk的中文语音输入
+
+---
+
+### 2. 规划层 Planning Layer
+
+#### 2.1 map_planner
+**功能**: 基于栅格地图的全局路径规划  
+**主要文件**: `map_planner.cpp`  
+**算法**: A*路径搜索 + 障碍物膨胀
+
+**核心流程**:
+1. 接收栅格地图（从pcd2pgm生成）
+2. 障碍物膨胀处理（安全边界）
+3. A*算法搜索最优路径
+4. 发布全局路径 `/initial_path`
+
+#### 2.2 局部规划器 - DWA (默认使用)
+**功能**: 动态窗口法局部避障  
+**实现方案**:
+
+**方案A - ROS标准DWA** (`navigation_planner.launch`):
+- 使用 `move_base` + `dwa_local_planner/DWAPlannerROS`
+- 配置文件: `dwa_local_planner_params.yaml`
+
+**方案B - 自定义DWA** (`model_planner.launch`):
+- 自实现的DWA规划器: `dwa_planner.cpp`
+- 配置文件: `local_planner.yaml`
+
+**DWA核心算法**:
+1. 在速度空间采样候选轨迹
+2. 前向模拟机器人运动
+3. 评估轨迹代价（障碍物距离、路径偏差、速度）
+4. 选择最优轨迹执行
+
+#### 2.3 NeuPAN (实验性备选方案)
+**功能**: 端到端神经网络局部规划器  
+**主要文件**: `neupan_ros.py`  
+**论文**: [NeuPAN (IEEE)](https://ieeexplore.ieee.org/document/10938329/)
+
+> **注意**: NeuPAN是独立的Python包，**不在默认launch文件中启动**。若要使用NeuPAN替代DWA，需手动运行 `python neupan_ros.py`。
+
+**特点**:
+- **高效避障**: 50Hz实时规划
+- **动态障碍**: 适应动态环境
+- **平滑轨迹**: 神经网络优化的运动轨迹
+
+**输入**:
+- 机器人状态 (x, y, θ)
+- 激光扫描点云（障碍物）
+- 全局路径（参考轨迹）
+
+**输出**:
+- 速度指令 (vx, vy, ω)
+- 优化后的轨迹
+
+**核心算法**:
+1. **DUNE采样**: 神经网络引导的障碍物采样
+2. **NRMP优化**: 近似风险最小化路径
+3. **MPC跟踪**: 模型预测控制
+
+#### 2.4 model_planner
+**功能**: 可自定义的规划器框架  
+**用途**: 用户可以实现自己的规划算法
+
+#### 2.5 navigation_planner
+**功能**: ROS标准导航栈封装  
+**包含**: move_base + DWA局部规划器
+
+---
+
+### 3. 控制层 Control Layer
+
+#### 3.1 unitree_control
+**功能**: Unitree Go2速度指令转发  
+**主要文件**: `unitree_vel_controller.cpp`
+
+**核心任务**:
+1. 接收ROS `/cmd_vel` 指令
+2. 转发给Unitree Go2 SDK
+3. 安全关闭处理（SIGINT信号）
+
+**速度映射**:
+- `linear.x` → 前后速度 (m/s)
+- `linear.y` → 左右速度 (m/s)
+- `angular.z` → 旋转角速度 (rad/s)
+
+**行走模式**:
+- **AI Walk** (FreeWalk): 自主导航推荐
+- **Classic Walk**: 经典四足步态
+
+---
+
+### 4. 工具层 Utility Layer
+
+#### 4.1 pcd2pgm
+**功能**: 点云地图转换为栅格地图  
+**输入**: `.pcd` 点云文件  
+**输出**: `.pgm` + `.yaml` 栅格地图
+
+#### 4.2 pointcloud_saver
+**功能**: 保存SLAM构建的点云地图
+
+#### 4.3 odin_vlm_terminal
+**功能**: 视觉语言模型场景理解  
+**模型**: SmolVLM / Qwen2-VL  
+**应用**: 场景描述、环境问答
+
+---
 
 
-# 关于人员跟随的梳理
+# 关于人员/物体跟随的梳理
 1. 感知层：看到物体 (yolo_detector.py)
   * 检测: 订阅RGB图像，YOLOv5识别物体（如 Person, Chair）。
   * 3D定位: 结合深度图，使用 FishPoly 模型将图像像素坐标 $(u,v)$ 反投影为相机坐标系下的3D坐标 $(x,y,z)$。
@@ -69,6 +199,8 @@
 
 ## 关于持续跟随
 
-`yolo_detector.py`中的`simple_avoidance_control`函数，该函数实现了基于视觉伺服的简单避障和目标跟随逻辑
+`yolo_detector.py`中的`simple_avoidance_control`函数，该函数实现了基于视觉伺服的简单避障和目标跟随逻辑，但该实现并不安全
 
 # 关于局部避障
+
+局部路径规划可以选择DWA（`navigation_planner.launch`和`model_planner.launch`）和NeuPAN(`whole.launch`)两种局部规划器

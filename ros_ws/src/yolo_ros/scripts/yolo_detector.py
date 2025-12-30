@@ -538,6 +538,8 @@ class YoloDetector:
             twist.angular.z = 0.0
             self.cmd_pub.publish(twist)
             return
+        
+        # 1. 寻找最近的物体
         nearest = None
         min_z = 1e9
         for d in det3d_msg.detections:
@@ -546,18 +548,25 @@ class YoloDetector:
                 min_z = z
                 nearest = d
         twist = Twist()
+
+         # 2. 如果没看到物体：以 0.2 m/s 向前盲走 (Danger!)
         if nearest is None:
             twist.linear.x = 0.2
             twist.angular.z = 0.0
         else:
-            x = nearest.bbox.center.position.x
-            z = nearest.bbox.center.position.z
+             # 3. 如果看到物体：
+            x = nearest.bbox.center.position.x  # 物体横向偏差
+            z = nearest.bbox.center.position.z  # 物体纵向偏差
+
+            # 计算转向（P控制器）：根据横向偏差 x 调整角速度，使物体保持在视野中心
             err = x / max(0.1, z)
             twist.angular.z = float(-0.8 * err)
+
+             # 计算前进：
             if z < 1.0:
-                twist.linear.x = 0.0
+                twist.linear.x = 0.0  # 距离小于1米，停车
             else:
-                twist.linear.x = 0.15
+                twist.linear.x = 0.15  # 距离大于1米，以0.15 m/s前进
         self.cmd_pub.publish(twist)
 
 
