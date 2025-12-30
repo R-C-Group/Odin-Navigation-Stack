@@ -1,6 +1,13 @@
-<p align="center">
-  <h2 align="center">Odin Navigation Stack解读</h2>
-</p>
+ <h1 align="center"> Odin Navigation Stack解读
+  </h1>
+
+[comment]: <> (  <h2 align="center">PAPER</h2>)
+  <h3 align="center">
+  <a href="https://github.com/ManifoldTechLtd/Odin-Nav-Stack">Original Github</a>
+  </h3>
+  <div align="center"></div>
+
+<br>
 
 [Odin Navigation Stack](https://github.com/ManifoldTechLtd/Odin-Nav-Stack) 是一个基于ROS1 Noetic的四足机器人（Unitree Go2）自主导航系统。系统集成了高精度SLAM、语义目标检测、神经网络规划器和视觉语言模型，提供完整的室内外导航解决方案。
 
@@ -60,4 +67,8 @@
    * 局部规划 (NeuPAN): 接收全局路径，结合实时激光雷达/深度图数据，使用神经网络模型进行动态避障，输出速度指令 /cmd_vel。
    * 执行 (Unitree): 接收速度指令，调用机器狗底层 SDK 执行运动。
 
+## 关于持续跟随
 
+`yolo_detector.py`中的`simple_avoidance_control`函数，该函数实现了基于视觉伺服的简单避障和目标跟随逻辑
+
+# 关于局部避障
