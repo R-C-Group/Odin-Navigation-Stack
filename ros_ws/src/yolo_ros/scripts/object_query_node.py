@@ -424,41 +424,46 @@ class ObjectQueryNode:
             "后面": "behind",
         }
 
-        # 1. 查找方向词 / Find direction
+        # 1. 【核心：方向词提取 (Direction Keyword Extraction)】
+        # 建立一个双语映射表，将模糊的自然语言（如"后面"、"back"、"b"）归一化为标准的内部方位枚举。
         found_direction = None
+        # 优先检索英文关键词，使用正向查找匹配 boundary (\b) 确保不匹配到单词内部
         for k, v in directions.items():
             if re.search(r"\b" + re.escape(k) + r"\b", cmd):
                 found_direction = v
                 break
+        # 如果英文没匹配到，检索中文方位词
         if not found_direction:
             for k, v in cn_directions.items():
                 if k in cmd_raw:
                     found_direction = v
                     break
 
+        # 如果连方向都没解析出来，说明指令不符合“运动到某物体的某方位”基本范式，返回 None
         if not found_direction:
             return None
 
-        # 2. 提取数字索引 (1-5) / Extract number index
+        # 2. 【核心：数字索引提取 (Ordinal/Index Extraction)】
+        # 支持“第一个”、“2nd”、“#3”等多种说法。这在多目标场景（如面前有三把椅子）下至关重要。
         index = None
         ordinals = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
-        # 英文序数词处理
+        # A. 处理英文序数词 (first/second...)
         for word, num in ordinals.items():
             if re.search(r"\b" + word + r"\b", cmd):
                 index = num
                 break
+        # B. 处理带符号的数字 (#2 / no. 2)
         if index is None:
-            # 处理 #2, no.2
             m = re.search(r"(?:#|no\.?\s*)([1-5])", cmd)
             if m:
                 index = int(m.group(1))
+        # C. 处理带后缀的数字 (1st / 2nd / 3rd...)
         if index is None:
-            # 处理 1st, 2nd
             m = re.search(r"\b([1-5])(st|nd|rd|th)\b", cmd)
             if m:
                 index = int(m.group(1))
+        # D. 处理中文“第N个” (支持汉字一至五或阿拉伯数字)
         if index is None:
-            # 处理中文 "第N个"
             m = re.search(r"第\s*([一二三四五1-5])\s*个?", cmd_raw)
             if m:
                 ch = m.group(1)
@@ -712,6 +717,11 @@ class ObjectQueryNode:
         计算相对于机器人自身的导航目标点（基于物体位置和方位）
         Calculate target position relative to robot in base_link frame based on object position and direction
         
+        【数学原理解析】：
+        1. 为什么要相对于机器人？因为用户说“去椅子的左边”通常是指“面向椅子时，机器人的左手边”。
+        2. 线段向量加法：目标点 = 物体点 + 偏移向量。
+        3. 偏移向量必须在机器人坐标系(base_link)定义，然后投影回全局坐标系(map)。
+
         工作逻辑 / Logic:
         1. "物体的前方"通常是指相对于机器人视角的"物体前方"（即物体和机器人之间）
            或者按照全局坐标系定义的"前方"。这里采用相对于机器人底盘朝向的定义。
@@ -728,7 +738,8 @@ class ObjectQueryNode:
         """
         x_obj, y_obj, z_obj = object_pos_map
         try:
-            # 获取 map -> base_link 的变换 / Get map -> base_link transform
+            # 获取 map 到 base_link 的实时 TF 变换
+            # 这告诉了我们机器人在世界地图中的具体姿态 (Quaternion)
             tf = self.tf_buffer.lookup_transform(
                 self.target_frame,  # map
                 self.base_frame,  # base_link
@@ -737,36 +748,37 @@ class ObjectQueryNode:
             )
         except Exception as e:
             rospy.logwarn(
-                f"Failed to get {self.target_frame}->{self.base_frame} transform, using map direction offset: {e}"
+                f"无法获取 TF 变换，降级采用地图静态方向轴计算: {e}"
             )
-            # 如果TF失败，回退到使用纯Map坐标系的偏移计算
             return self.calculate_target_position_in_map(
                 object_pos_map, direction, distance
             )
 
+        # A. 提取四元数并转换为 3x3 旋转矩阵 R
+        # R 矩阵的列向量其实就是 base_link 的三个轴在 map 系下的分量。
         q = tf.transform.rotation
-        R = self.quaternion_to_rotation_matrix(
-            q.x, q.y, q.z, q.w
-        )  # 3x3矩阵，表示base相对于map的旋转 / Rotation matrix from base to map
+        R = self.quaternion_to_rotation_matrix(q.x, q.y, q.z, q.w)
         
-        # 计算base坐标系的X轴和Y轴在map坐标系中的方向向量
-        ex_map = np.array([R[0][0], R[1][0], 0.0])  # base x axis in map (forward)
-        ey_map = np.array([R[0][1], R[1][1], 0.0])  # base y axis in map (left)
+        # B. 提取机器人当前的前向向量 (X轴) 和左向向量 (Y轴)
+        # R[0][0], R[1][0] 代表 base_x 在 map 的投影 (即机器人头部的指向)
+        ex_map = np.array([R[0][0], R[1][0], 0.0])  # 正前方向量
+        ey_map = np.array([R[0][1], R[1][1], 0.0])  # 正左方向量
 
         dx, dy = 0.0, 0.0
+        # 根据解析出的语义方向，确定在机器人坐标系内部的位移增量
         if direction == "front":
-            dx = distance  # 机器人前方
+            dx = distance  # 机器人前方 (base_x+)
         elif direction == "behind":
-            dx = -distance # 机器人后方
+            dx = -distance # 机器人后方 (base_x-)
         elif direction == "left":
-            dy = distance  # 机器人左方
+            dy = distance  # 机器人左方 (base_y+)
         elif direction == "right":
-            dy = -distance # 机器人右方
+            dy = -distance # 机器人右方 (base_y-)
 
-        # 计算偏移向量 = dx * front_vec + dy * left_vec
+        # C. 向量合成：偏移量 = dx * 前向单位向量 + dy * 左向单位向量
         offset_map = dx * ex_map + dy * ey_map
         
-        # 最终目标点 = 物体位置 + 偏移向量
+        # D. 终点坐标 = 目标物体中心点 + 计算出的偏移向量
         target = (x_obj + float(offset_map[0]), y_obj + float(offset_map[1]), z_obj)
         return target
 
@@ -1649,46 +1661,49 @@ class ObjectQueryNode:
     def _voice_loop(self):
         if not self._voice_ready:
             return
-        rospy.loginfo("Voice recognition thread started.")
-        # Keep the audio stream open and end with one sentence based on the mute determination
+        rospy.loginfo("语音识别线程已启动，进入音频流监听循环...")
+        
+        # 建立音频采集流上下文，并监听静音结束判断
         try:
             with self._raw_input_stream():
-                utter_started = False
-                utter_start_time = 0.0
-                last_activity_time = 0.0
-                last_partial_text = ""
+                utter_started = False      # 是否已开始说话
+                utter_start_time = 0.0     # 说话起始时间
+                last_activity_time = 0.0   # 最后一次音频活跃（非静音）时间
+                last_partial_text = ""     # 上一次的中间识别结果（用于判定是否还在说话）
+
                 while not rospy.is_shutdown() and not self._voice_stop.is_set():
-                    # Read audio block
+                    # 1. 【核心：采样队列读取】
                     try:
                         data = self._audio_q.get(timeout=0.2)
                     except Exception:
-                        # Check if the silence ends
+                        # 如果队列 200ms 没数据，进入【静音结算判定区】
                         if (
                             utter_started
-                            and (time.time() - last_activity_time)
-                            >= self.voice_end_silence
-                            and (time.time() - utter_start_time)
-                            >= self.voice_min_duration
+                            and (time.time() - last_activity_time) >= self.voice_end_silence
+                            and (time.time() - utter_start_time) >= self.voice_min_duration
                         ):
+                            # 判定句子结束：已开始说话 + 持久静音时长超过阈值 + 总时长大于最短长度限制
                             final = json.loads(self._recognizer.FinalResult())
                             text = final.get("text", "").strip()
                             self._handle_voice_text(text)
-                            # Reset
+                            # 状态重置，准备接收下一句
                             self._recognizer.Reset()
                             utter_started = False
                             last_partial_text = ""
-                            time.sleep(self.voice_debounce)
+                            time.sleep(self.voice_debounce) # 避震冷却，防止回声或尾音重复识别
                         continue
 
-                    # Send audio to recognizer
+                    # 2. 【核心：波形引擎推理】
+                    # 将采样的 PCM 音频数据喂给 Kaldi 识别器
                     if self._recognizer.AcceptWaveform(data):
+                        # 如果识别器判定当前语句已完整结束（依据引擎内部 VAD 逻辑）
                         res = json.loads(self._recognizer.Result())
                         text = res.get("text", "").strip()
                         if not utter_started:
                             utter_started = True
                             utter_start_time = time.time()
                         last_activity_time = time.time()
-                        # Directly as a sentence ends
+                        
                         self._handle_voice_text(text)
                         self._recognizer.Reset()
                         utter_started = False
@@ -1696,27 +1711,29 @@ class ObjectQueryNode:
                         time.sleep(self.voice_debounce)
                         continue
                     else:
-                        # Process partial results, update activity time
+                        # 3. 【核心：中间结果处理 (Partial Result)】
+                        # 如果语句还没结束，获取当前解析出的已知片段（中间态成果）
                         try:
                             partial_json = json.loads(self._recognizer.PartialResult())
                             partial = partial_json.get("partial", "")
                         except Exception:
                             partial = ""
+                        
                         if partial:
                             if not utter_started:
                                 utter_started = True
                                 utter_start_time = time.time()
-                            # Only update activity time when there is a change
+                            # 如果中间文本有更新，说明用户仍在吐字，刷新“活跃时间”
                             if partial != last_partial_text:
                                 last_partial_text = partial
                                 last_activity_time = time.time()
-                        # End of sentence based on silence
+                        
+                        # 兜底判定：如果说话时间过长（强拆判定）或静音超时（自然结束判定）
                         if utter_started:
                             dur = time.time() - utter_start_time
                             since_last = time.time() - last_activity_time
                             if (
-                                dur >= self.voice_min_duration
-                                and since_last >= self.voice_end_silence
+                                dur >= self.voice_min_duration and since_last >= self.voice_end_silence
                             ) or dur >= self.voice_max_duration:
                                 final = json.loads(self._recognizer.FinalResult())
                                 text = final.get("text", "").strip()
