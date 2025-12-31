@@ -23,6 +23,29 @@
 
 # 核心模块
 
+* 感知层 (Perception Layer)
+  *   **YOLO 物体检测**: 实时识别环境中的椅子、人、桌子等语义目标。
+  *   **3D 视觉定位**: 结合深度图信息，将检测到的 2D 目标映射到 3D 空间坐标。
+  *   **语义指令解析**: 支持自然语言指令（如“走到那个红色的椅子旁边”），通过语义查询节点转化为具体的导航目标。
+
+* 规划层 (Planning Layer)
+  *   **A* 全局规划**: 在栅格地图上寻找从当前位置到目标的全局最优路径。
+  *   **DWA (Dynamic Window Approach)**: 默认局部避障算法，通过速度采样和轨迹模拟，实现动态避障。
+  *   **NeuPAN (神经网络规划)**: 实验性端到端局部规划方案，具有极高的规划频率（50Hz+）和更平滑的避障表现。
+  *   **局部代价地图 (Local Costmap)**: 维护一个随机器人滚动的实时障碍物地图，支持“记忆衰减”机制，能有效处理动态障碍。
+
+* 控制层 (Control Layer)
+  *   **Unitree 运动控制器**: 将速度指令 (`/cmd_vel`) 转发给四足机器人底盘，驱动电机执行具体步态。
+
+<div align="center">
+  <img src="./scripts/odin_logical_arch_cn_1767142123104.png" width="90%" />
+  <img src="./scripts/odin_data_flow_cn_1767142150666.png" width="100%" />
+<figcaption>  
+</figcaption>
+</div>
+
+
+
 ### 1. 感知层 Perception Layer
 
 #### 1.1 odin_ros_driver
