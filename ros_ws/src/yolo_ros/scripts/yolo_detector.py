@@ -150,7 +150,7 @@ class YoloDetector:
             CompressedImage if self.rgb_topic.endswith("/compressed") else Image
         )
         
-        # 订阅RGB图像话题 / Subscribe to RGB image topic
+        # 订阅RGB图像话题 / Subscribe to RGB image topic（订阅图像话题的时候进行检测）
         self.image_sub = rospy.Subscriber(
             self.rgb_topic,
             rgb_msg_type,
@@ -272,8 +272,8 @@ class YoloDetector:
         if img.ndimension() == 3:
             img = img.unsqueeze(0)  # add batch dimension
 
-        pred = self.model(img)[0]
-        pred = non_max_suppression(pred, conf_thres=0.25, iou_thres=0.45)
+        pred = self.model(img)[0] #进行检测识别
+        pred = non_max_suppression(pred, conf_thres=0.25, iou_thres=0.45) #非极大值抑制
 
         det_msg = Detection2DArray()
         det_msg.header = msg.header
@@ -288,7 +288,7 @@ class YoloDetector:
                 # scale boxes to original image size
                 det[:, :4] = scale_boxes(
                     img.shape[2:], det[:, :4], img_orig.shape
-                ).round()
+                ).round() #将检测结果还原到原始图像尺寸
 
                 for *xyxy, conf, cls in reversed(det):
                     x1, y1, x2, y2 = map(int, xyxy)
@@ -369,6 +369,7 @@ class YoloDetector:
         except Exception as e:
             return
 
+    # 坐标系转换利用 ROS TF 将 3D 点从相机系转换到地图系 (map)。
     def transform_to_target_frame(self, x_cam, y_cam, z_cam, timestamp):
         """
         transform point from camera frame to target frame
@@ -459,6 +460,7 @@ class YoloDetector:
         )
         return R
 
+    # 鱼眼模型反投影 (2D -> 3D Camera)
     def unproject_fisheye(self, u, v, depth):
         """use FishPoly model to unproject pixel coordinates and depth to 3D camera coordinates"""
         try:
@@ -519,6 +521,7 @@ class YoloDetector:
             rospy.logwarn(f"Fisheye unprojection failed: {e}")
             return None, None, None
 
+    # 提取检测框中心点的深度值，采用 5x5 区域的中值滤波以保证稳定性。
     def get_depth_m(self, u, v):
         if self.depth_image is None:
             return None
